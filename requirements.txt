@@ -1,0 +1,26 @@
+# === Web Framework ===
+fastapi==0.115.12
+uvicorn[standard]==0.34.2
+
+# === Database (local) ===
+sqlalchemy==2.0.41
+aiosqlite==0.21.0
+
+# === SAP B1 Connection ===
+pyodbc==5.2.0
+
+# === Data Science ===
+pandas==2.2.3
+numpy==2.2.6
+statsmodels==0.14.4
+scikit-learn==1.6.1
+
+# === Email ===
+jinja2==3.1.6
+
+# === Configuration ===
+pydantic-settings==2.9.1
+python-dotenv==1.1.0
+
+# === Dev Tools ===
+httpx==0.28.1
