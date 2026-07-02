@@ -119,6 +119,7 @@ onMounted(() => {
           :items="items" 
           :loading="loading" 
           :is-draft="isDraft"
+          :target-stock-days="run?.target_stock_days"
           @update-item="handleItemUpdate" 
         />
       </div>

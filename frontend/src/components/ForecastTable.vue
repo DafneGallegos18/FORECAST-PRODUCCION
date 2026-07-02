@@ -13,6 +13,7 @@ const props = defineProps<{
   items: any[]
   loading: boolean
   isDraft?: boolean
+  targetStockDays?: number
 }>()
 
 const emit = defineEmits<{
@@ -133,7 +134,7 @@ const getConfidenceSeverity = (score: number | null) => {
         </template>
       </Column>
 
-      <Column field="target_inventory_consumption" header="Objetivo Inv." sortable style="width: 10%">
+      <Column field="target_inventory_consumption" :header="`Consumo ${props.targetStockDays || 15} Días`" sortable style="width: 10%">
         <template #body="{ data }">
           <span class="text-blue-600 font-medium">{{ Math.ceil(data.target_inventory_consumption).toLocaleString() }}</span>
         </template>
