@@ -30,6 +30,7 @@ class ExclusionType(str, enum.Enum):
     CARD_NAME_CONTAINS = "card_name_contains"  # Excluir por texto en nombre
     CATEGORY = "category"                # Excluir categoría completa
     CUSTOMER_GROUP = "customer_group"    # Excluir por grupo de clientes
+    ITEM_CODE = "item_code"              # Excluir un SKU/producto específico
 
 
 class AlertSeverity(str, enum.Enum):
@@ -52,6 +53,7 @@ class ForecastRun(Base):
     status = Column(SAEnum(RunStatus), default=RunStatus.DRAFT)
     lookback_days = Column(Integer, default=28)
     target_stock_days = Column(Integer, default=15)
+    shelf_life_safety_pct = Column(Float, default=50.0)
     notes = Column(Text, nullable=True)
     approved_by = Column(String(100), nullable=True)
 
@@ -87,6 +89,13 @@ class ForecastItem(Base):
     general_adjustment = Column(Float, default=0)     # Ajuste total del usuario a nivel general
     final_need = Column(Float, default=0)             # Suma de (clientes.final_need) + general_adjustment
 
+    # Metadata de caducidad y lotificación
+    shelf_life_days = Column(Float, nullable=True)
+    max_safe_days = Column(Float, nullable=True)
+    effective_target_days = Column(Float, nullable=True)
+    is_batch_optimized = Column(Boolean, default=False)
+    has_expiration_risk = Column(Boolean, default=False)
+
     # Metadata del modelo
     model_used = Column(String(50), default="simple_avg")  # simple_avg, wma, ses, holt_winters
     confidence_score = Column(Float, nullable=True)
@@ -101,6 +110,21 @@ class ForecastItem(Base):
 
     def __repr__(self):
         return f"<ForecastItem {self.item_code} need={self.final_need}>"
+
+
+# ── Product Shelf Life ─────────────────────────────────────────────
+
+class ProductShelfLife(Base):
+    """Tiempo promedio de vida útil / caducidad por producto (SKU)."""
+    __tablename__ = "product_shelf_life"
+
+    item_code = Column(String(50), primary_key=True)
+    item_name = Column(String(255), nullable=True)
+    shelf_life_days = Column(Float, nullable=False)
+    updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+    def __repr__(self):
+        return f"<ProductShelfLife {self.item_code} - {self.shelf_life_days}d>"
 
 
 # ── Forecast Item Client (Hijo) ────────────────────────────────────
@@ -192,3 +216,31 @@ class AlertLog(Base):
     acknowledged = Column(Boolean, default=False)
     acknowledged_by = Column(String(100), nullable=True)
     acknowledged_at = Column(DateTime, nullable=True)
+
+
+# ── Demandas Especiales ───────────────────────────────────────────
+
+class SpecialDemand(Base):
+    """
+    Registro de incrementos programados de demanda.
+    Cruza consumos con SAP para descontar lo ya vendido y evitar duplicados.
+    """
+    __tablename__ = "special_demands"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    item_code = Column(String(50), nullable=False)
+    item_name = Column(String(255), nullable=True)
+    card_code = Column(String(50), nullable=True)
+    card_name = Column(String(255), nullable=True)
+    quantity = Column(Float, nullable=False)
+    consumed_qty = Column(Float, default=0.0)
+    start_date = Column(DateTime, nullable=False)
+    end_date = Column(DateTime, nullable=False)
+    reason = Column(Text, nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+
+    @property
+    def remaining_qty(self):
+        return max(0.0, self.quantity - self.consumed_qty)
+

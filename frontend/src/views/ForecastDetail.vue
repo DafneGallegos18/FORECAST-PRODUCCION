@@ -92,7 +92,8 @@ onMounted(() => {
           <p class="text-sm text-gray-500">
             Generado el {{ new Date(run.created_at).toLocaleString() }} 
             | Histórico: {{ run.lookback_days }} días 
-            | Meta: {{ run.target_stock_days }} días
+            | Meta Base: {{ run.target_stock_days }} días
+            | % Vida Útil Segura: {{ run.shelf_life_safety_pct ?? 50 }}%
           </p>
         </div>
         

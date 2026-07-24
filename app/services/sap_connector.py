@@ -5,6 +5,7 @@ Maneja la conexión, ejecución de queries y cierre limpio.
 
 import pyodbc
 import pandas as pd
+import threading
 from typing import Optional
 from config.settings import sap_settings
 
@@ -17,6 +18,7 @@ class SAPConnector:
 
     def __init__(self):
         self._connection: Optional[pyodbc.Connection] = None
+        self._lock = threading.Lock()
 
     def _build_connection_string(self) -> str:
         """Construye el string de conexión según la configuración."""
@@ -30,37 +32,50 @@ class SAPConnector:
                 f"UID={sap_settings.db_user};"
                 f"PWD={sap_settings.db_password};"
                 f"TrustServerCertificate=yes;"
+                f"MARS_Connection=yes;"
             )
 
-    def connect(self) -> pyodbc.Connection:
+    def connect(self, force_new: bool = False) -> pyodbc.Connection:
         """Establece o reutiliza la conexión a SAP."""
-        if self._connection is None:
+        if force_new or self._connection is None:
+            self.close()
             conn_str = self._build_connection_string()
-            self._connection = pyodbc.connect(conn_str, readonly=True)
+            self._connection = pyodbc.connect(conn_str, readonly=True, autocommit=True)
             print("✅ Conectado a SAP B1 (solo lectura)")
         return self._connection
 
     def query(self, sql: str, params: Optional[tuple] = None) -> pd.DataFrame:
         """
         Ejecuta un query SQL y retorna los resultados como DataFrame de Pandas.
-
-        Args:
-            sql: Query SQL de solo lectura.
-            params: Parámetros opcionales para queries parametrizados.
-
-        Returns:
-            pd.DataFrame con los resultados.
+        Reintenta automáticamente reconectando si la conexión se perdió.
+        Utiliza un lock de hilo para prevenir colisiones concurrentes (Connection is busy).
         """
-        conn = self.connect()
-        try:
-            if params:
-                df = pd.read_sql_query(sql, conn, params=params)
-            else:
-                df = pd.read_sql_query(sql, conn)
-            return df
-        except pyodbc.Error as e:
-            print(f"❌ Error al ejecutar query SAP: {e}")
-            raise
+        with self._lock:
+            for attempt in range(2):
+                try:
+                    conn = self.connect(force_new=(attempt > 0))
+                    cursor = conn.cursor()
+                    try:
+                        if params:
+                            cursor.execute(sql, params)
+                        else:
+                            cursor.execute(sql)
+                        
+                        columns = [col[0] for col in cursor.description]
+                        rows = [list(row) for row in cursor.fetchall()]
+                        
+                        return pd.DataFrame(rows, columns=columns)
+                    finally:
+                        try:
+                            cursor.close()
+                        except Exception:
+                            pass
+                except (pyodbc.Error, Exception) as e:
+                    print(f"⚠️ Intentando reconectar a SAP (intento {attempt + 1}) por error: {e}")
+                    self.close()
+                    if attempt == 1:
+                        print(f"❌ Error fatal al ejecutar query SAP: {e}")
+                        raise
 
     def test_connection(self) -> bool:
         """Prueba rápida de conectividad."""
@@ -78,7 +93,10 @@ class SAPConnector:
     def close(self):
         """Cierra la conexión a SAP de forma limpia."""
         if self._connection:
-            self._connection.close()
+            try:
+                self._connection.close()
+            except Exception:
+                pass
             self._connection = None
             print("🔌 Conexión a SAP cerrada")
 

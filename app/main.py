@@ -26,7 +26,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
 from app.database import init_db, SessionLocal
-from app.routes import forecast, exclusions, alerts
+from app.routes import forecast, exclusions, alerts, special_demands
 from app.services.exclusion_service import seed_default_exclusions
 from config.settings import app_settings
 
@@ -82,6 +82,7 @@ app.add_middleware(
 app.include_router(forecast.router)
 app.include_router(exclusions.router)
 app.include_router(alerts.router)
+app.include_router(special_demands.router)
 
 
 # ── Health Check ──────────────────────────────────────────────────
@@ -101,6 +102,8 @@ if os.path.isdir(frontend_dir):
     @app.get("/{full_path:path}")
     async def serve_frontend(full_path: str):
         """SPA fallback: sirve index.html para rutas no-API."""
+        if full_path.startswith("api/") or full_path == "api":
+            raise HTTPException(status_code=404, detail="API endpoint no encontrado")
         index = os.path.join(frontend_dir, "index.html")
         if os.path.exists(index):
             return FileResponse(index)

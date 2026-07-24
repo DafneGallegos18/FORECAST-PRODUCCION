@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from app.database import get_db
-from app.models.db_models import ForecastRun, ForecastItem, ForecastItemClient, ManualAdjustment, RunStatus
+from app.models.db_models import (
+    ForecastRun, ForecastItem, ForecastItemClient, ManualAdjustment, RunStatus, SpecialDemand, ProductShelfLife
+)
 from app.models.schemas import (
     ForecastRunOut, ForecastRunDetail, ForecastItemOut, ForecastItemClientOut,
     AdjustRequest, ApproveRequest, PipelineConfig,
@@ -17,10 +19,13 @@ from app.models.schemas import (
 from app.services.data_pipeline import run_pipeline, extract_daily_series
 from app.services.forecast_engine import calculate_forecast
 from app.services.alert_service import evaluate_alerts
+from app.services.special_demand_service import sync_special_demands_with_sap
 from config.settings import forecast_settings
 
 router = APIRouter(prefix="/api/forecast", tags=["Forecast"])
 
+
+from app.services.exclusion_service import apply_exclusions
 
 @router.post("/run", response_model=ForecastRunOut)
 def execute_forecast(
@@ -34,6 +39,14 @@ def execute_forecast(
     model_name = cfg.model
     lookback = cfg.lookback_days
     target = cfg.target_stock_days
+    safety_pct = cfg.shelf_life_safety_pct
+    now = datetime.now()
+
+    # 0. Sincronizar consumos de demandas especiales con SAP
+    try:
+        sync_special_demands_with_sap(db)
+    except Exception as e:
+        print(f"⚠️ Error al sincronizar demandas especiales con SAP: {e}")
 
     # 1. Ejecutar pipeline de extracción (trae desglose por cliente)
     df = run_pipeline(db, lookback_days=lookback, target_stock_days=target)
@@ -45,16 +58,21 @@ def execute_forecast(
     daily_df = None
     if model_name != "simple_avg":
         try:
-            daily_df = extract_daily_series(lookback_days=max(lookback, 60))
-            daily_df = apply_exclusions(daily_df, db)
+            daily_df = extract_daily_series(db, lookback_days=max(lookback, 60))
         except Exception as e:
             print(f"⚠️  No se pudo extraer serie diaria, usando promedio simple: {e}")
             model_name = "simple_avg"
+
+    # 2.5 Cargar catálogo de días de caducidad por producto
+    shelf_life_map = {
+        ps.item_code: ps.shelf_life_days for ps in db.query(ProductShelfLife).all()
+    }
 
     # 3. Crear la corrida en DB
     run = ForecastRun(
         lookback_days=lookback,
         target_stock_days=target,
+        shelf_life_safety_pct=safety_pct,
         status=RunStatus.DRAFT,
     )
     db.add(run)
@@ -63,15 +81,16 @@ def execute_forecast(
     # 4. Agrupar por Producto (ItemCode)
     grouped = df.groupby("ItemCode")
     items_added = 0
+    processed_item_codes = set()
 
     for item_code_val, group in grouped:
         item_code = str(item_code_val)
+        processed_item_codes.add(item_code)
         first_row = group.iloc[0]
         
         # Sumar consumos de todos los clientes de este producto
         total_historical_consumption = float(group["ConsumoPromedio"].sum())
         total_consumption = total_historical_consumption
-        total_target_consumption = float(group["ConsumoObjetivo"].sum())
         total_committed = float(group["Comprometido"].sum())
         confidence = None
         used_model = model_name
@@ -87,12 +106,48 @@ def execute_forecast(
                         item_series, model_name=model_name, lookback_days=lookback
                     )
 
-        # Si el modelo matemático modificó total_consumption, recalculamos total_target_consumption
-        total_target_consumption = total_consumption * target
+        # Evaluación de caducidad y horizonte de cobertura seguro
+        shelf_days = shelf_life_map.get(item_code)
+        max_safe_days = None
+        effective_target = float(target)
+        is_batch_optimized = False
+        has_expiration_risk = False
+
+        if shelf_days is not None and shelf_days > 0:
+            max_safe_days = shelf_days * (safety_pct / 100.0)
+            if target > max_safe_days:
+                effective_target = max_safe_days
+                has_expiration_risk = True
+            else:
+                # Si el producto tiene buena vida útil (ej. >=60 días) y target es corto, consolidamos
+                if shelf_days >= 60 and target < 30:
+                    effective_target = min(max_safe_days, 30.0)
+                    is_batch_optimized = True
+
+        total_target_consumption = total_consumption * effective_target
+
+        stock = float(first_row.get("Stock01", 0))
+        if stock > 0 and total_consumption > 0 and max_safe_days is not None:
+            if (stock / total_consumption) > max_safe_days:
+                has_expiration_risk = True
+
+        # Obtener demandas especiales activas para este SKU
+        special_demands = db.query(SpecialDemand).filter(
+            SpecialDemand.item_code == item_code,
+            SpecialDemand.is_active == True,
+            SpecialDemand.start_date <= now,
+            SpecialDemand.end_date >= now
+        ).all()
+        
+        # Sumar el volumen restante de demandas especiales generales (sin cliente)
+        general_special_remaining = sum([sd.remaining_qty for sd in special_demands if not sd.card_code])
+        client_special_remaining_total = sum([sd.remaining_qty for sd in special_demands if sd.card_code])
 
         # Necesidad a nivel Producto
-        stock = float(first_row.get("Stock01", 0))
-        calculated_need_total = max(0, total_target_consumption - stock)
+        base_need = max(0, total_target_consumption - stock)
+        
+        # Necesidad total = necesidad base + demandas especiales (generales y de clientes)
+        calculated_need_total = base_need + general_special_remaining + client_special_remaining_total
 
         # Crear el Padre (ForecastItem)
         item = ForecastItem(
@@ -109,15 +164,20 @@ def execute_forecast(
             calculated_need=calculated_need_total,
             general_adjustment=0,
             final_need=calculated_need_total,
+            shelf_life_days=shelf_days,
+            max_safe_days=max_safe_days,
+            effective_target_days=effective_target,
+            is_batch_optimized=is_batch_optimized,
+            has_expiration_risk=has_expiration_risk,
             model_used=used_model,
             confidence_score=confidence,
         )
         db.add(item)
         db.flush() # Para obtener item.id
         
-        sum_clients_need = 0
+        processed_clients = set()
         
-        # Crear los Hijos (ForecastItemClient)
+        # Crear los Hijos (ForecastItemClient) - Clientes con historial
         for _, row in group.iterrows():
             card_code = str(row.get("CardCode", ""))
             if not card_code or card_code == "nan":
@@ -126,17 +186,21 @@ def execute_forecast(
             client_consumption_hist = float(row.get("ConsumoPromedio", 0))
             client_committed = float(row.get("Comprometido", 0))
             
-            # Para mantener la coherencia con el total de consumo proyectado por el modelo,
-            # escalamos el consumo promedio del cliente y su necesidad proporcionalmente.
+            # Escalado proporcional de la necesidad base + demanda especial general
+            base_and_general_need = base_need + general_special_remaining
             if total_historical_consumption > 0:
                 client_ratio = client_consumption_hist / total_historical_consumption
+                client_need = base_and_general_need * client_ratio
                 client_consumption = client_consumption_hist * (total_consumption / total_historical_consumption)
-                client_need = calculated_need_total * client_ratio
             else:
                 client_consumption = 0
                 client_need = 0
-
-            sum_clients_need += client_need
+            
+            # Sumar demanda especial específica de este cliente
+            client_specific_sd = sum([sd.remaining_qty for sd in special_demands if sd.card_code == card_code])
+            client_need += client_specific_sd
+            
+            processed_clients.add(card_code)
 
             client = ForecastItemClient(
                 item_id=item.id,
@@ -149,6 +213,113 @@ def execute_forecast(
             )
             db.add(client)
             
+        # Crear Hijos para clientes NUEVOS sin historial que tienen demandas especiales
+        for sd in special_demands:
+            if sd.card_code and sd.card_code not in processed_clients:
+                client = ForecastItemClient(
+                    item_id=item.id,
+                    card_code=sd.card_code,
+                    card_name=sd.card_name or "Cliente Nuevo (Especial)",
+                    avg_daily_consumption=0.0,
+                    committed_qty=0.0,
+                    calculated_need=sd.remaining_qty,
+                    final_need=sd.remaining_qty
+                )
+                db.add(client)
+                processed_clients.add(sd.card_code)
+            
+        items_added += 1
+
+    # 4.5 Procesar Demandas Especiales para PRODUCTOS NUEVOS (sin historial de ventas en SAP)
+    all_active_special_demands = db.query(SpecialDemand).filter(
+        SpecialDemand.is_active == True,
+        SpecialDemand.start_date <= now,
+        SpecialDemand.end_date >= now
+    ).all()
+
+    new_item_demands = {}
+    for sd in all_active_special_demands:
+        if sd.item_code not in processed_item_codes:
+            if sd.item_code not in new_item_demands:
+                new_item_demands[sd.item_code] = []
+            new_item_demands[sd.item_code].append(sd)
+
+    for new_item_code, sds in new_item_demands.items():
+        stock01 = 0.0
+        stock03 = 0.0
+        item_name = sds[0].item_name or new_item_code
+        unit = "Pza"
+        
+        try:
+            from app.services.sap_connector import sap_connector
+            sap_info = sap_connector.query(f"""
+                SELECT 
+                    T0.ItemCode, T0.ItemName, T0.InvntryUom,
+                    CAST(ISNULL(A01.OnHand, 0) AS FLOAT) AS Stock01,
+                    CAST(ISNULL(A03.OnHand, 0) AS FLOAT) AS Stock03
+                FROM OITM T0
+                LEFT JOIN OITW A01 ON T0.ItemCode = A01.ItemCode AND A01.WhsCode = '01'
+                LEFT JOIN OITW A03 ON T0.ItemCode = A03.ItemCode AND A03.WhsCode = '03'
+                WHERE T0.ItemCode = '{new_item_code}'
+            """)
+            if not sap_info.empty:
+                r = sap_info.iloc[0]
+                item_name = str(r.get("ItemName") or item_name)
+                unit = str(r.get("InvntryUom") or unit)
+                stock01 = float(r.get("Stock01", 0))
+                stock03 = float(r.get("Stock03", 0))
+        except Exception as e:
+            print(f"⚠️ Error al consultar datos SAP para nuevo producto especial {new_item_code}: {e}")
+
+        general_special_remaining = sum([sd.remaining_qty for sd in sds if not sd.card_code])
+        client_special_remaining_total = sum([sd.remaining_qty for sd in sds if sd.card_code])
+        calculated_need_total = max(0.0, general_special_remaining + client_special_remaining_total - stock01)
+
+        shelf_days = shelf_life_map.get(new_item_code)
+        max_safe_days = (shelf_days * (safety_pct / 100.0)) if shelf_days else None
+
+        item = ForecastItem(
+            run_id=run.id,
+            item_code=new_item_code,
+            item_name=item_name,
+            unit=unit,
+            stock_whs_01=stock01,
+            stock_whs_03=stock03,
+            avg_daily_consumption=0.0,
+            days_of_inventory=None,
+            target_inventory_consumption=0.0,
+            committed_qty=0.0,
+            calculated_need=calculated_need_total,
+            general_adjustment=0,
+            final_need=calculated_need_total,
+            shelf_life_days=shelf_days,
+            max_safe_days=max_safe_days,
+            effective_target_days=float(target),
+            is_batch_optimized=False,
+            has_expiration_risk=False,
+            model_used="special_demand_only",
+            confidence_score=1.0,
+        )
+        db.add(item)
+        db.flush()
+
+        processed_clients = set()
+        for sd in sds:
+            card_code = sd.card_code or "GENERAL"
+            card_name = sd.card_name or ("GENERAL (Todos)" if not sd.card_code else "Cliente Nuevo (Especial)")
+            if card_code not in processed_clients:
+                client = ForecastItemClient(
+                    item_id=item.id,
+                    card_code=card_code,
+                    card_name=card_name,
+                    avg_daily_consumption=0.0,
+                    committed_qty=0.0,
+                    calculated_need=sd.remaining_qty,
+                    final_need=sd.remaining_qty
+                )
+                db.add(client)
+                processed_clients.add(card_code)
+
         items_added += 1
 
     # 5. Generar alertas
@@ -164,6 +335,7 @@ def execute_forecast(
         status=run.status,
         lookback_days=run.lookback_days,
         target_stock_days=run.target_stock_days,
+        shelf_life_safety_pct=run.shelf_life_safety_pct,
         notes=run.notes,
         item_count=items_added,
     )

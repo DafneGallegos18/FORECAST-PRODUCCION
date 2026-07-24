@@ -31,3 +31,7 @@ Thumbs.db
 
 # Node (frontend, future)
 node_modules/
+
+# Archives & Temporary
+*.tar.gz
+scratch_*.py

@@ -55,6 +55,11 @@ class ForecastItemOut(BaseModel):
     calculated_need: float
     general_adjustment: float
     final_need: float
+    shelf_life_days: Optional[float] = None
+    max_safe_days: Optional[float] = None
+    effective_target_days: Optional[float] = None
+    is_batch_optimized: bool = False
+    has_expiration_risk: bool = False
     model_used: str
     confidence_score: Optional[float]
     channel: Optional[str]
@@ -69,6 +74,7 @@ class ForecastRunOut(BaseModel):
     status: RunStatus
     lookback_days: int
     target_stock_days: int
+    shelf_life_safety_pct: float = 50.0
     notes: Optional[str]
     item_count: int = 0
 
@@ -114,4 +120,41 @@ class PipelineConfig(BaseModel):
     """Configuración para ejecutar el pipeline de datos."""
     lookback_days: int = Field(default=28, ge=7, le=365)
     target_stock_days: int = Field(default=15, ge=1, le=90)
+    shelf_life_safety_pct: float = Field(default=50.0, ge=10.0, le=100.0)
     model: str = Field(default="ses", pattern="^(simple_avg|wma|ses|holt_winters)$")
+
+
+# ── Demandas Especiales ────────────────────────────────────────────
+
+class SpecialDemandCreate(BaseModel):
+    item_code: str
+    item_name: Optional[str] = None
+    card_code: Optional[str] = None
+    card_name: Optional[str] = None
+    quantity: float
+    start_date: datetime
+    end_date: datetime
+    reason: Optional[str] = None
+
+
+class SpecialDemandUpdate(BaseModel):
+    item_code: Optional[str] = None
+    item_name: Optional[str] = None
+    card_code: Optional[str] = None
+    card_name: Optional[str] = None
+    quantity: Optional[float] = None
+    start_date: Optional[datetime] = None
+    end_date: Optional[datetime] = None
+    reason: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
+class SpecialDemandOut(SpecialDemandCreate):
+    id: int
+    consumed_qty: float
+    remaining_qty: float
+    is_active: bool
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+

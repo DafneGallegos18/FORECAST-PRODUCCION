@@ -96,6 +96,10 @@ def apply_exclusions(df: pd.DataFrame, db: Session) -> pd.DataFrame:
                 else:
                     exclude_mask |= df["Category"].str.lower() == exc.value.lower()
 
+        elif exc.exclusion_type == ExclusionType.ITEM_CODE:
+            # Excluir todas las filas de un producto/SKU específico
+            exclude_mask |= df["ItemCode"] == exc.value
+
     excluded_count = exclude_mask.sum()
     if excluded_count > 0:
         print(f"   🚫 {excluded_count} registros excluidos por {len(exclusions)} reglas activas")
@@ -158,7 +162,84 @@ def seed_default_exclusions(db: Session):
             value="132",
             description="Exclusión del grupo de clientes: Empleados LABEN (GroupCode 132)"
         ),
+        # Exclusiones de productos/SKUs de conversión (no fabricados) solicitados por el usuario
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2112035",
+            description="Exclusión SKU (Conversión): QUESO GOUDA EN BARRA N 2.5KG PV"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2112104",
+            description="Exclusión SKU (Conversión): QUESO MANCHEGO EN BARRA 1 / 400 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2112105",
+            description="Exclusión SKU (Conversión): QUESO CHIHUAHUA EN BARRA 1 / 400 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2113029",
+            description="Exclusión SKU (Conversión): QUESO CHIHUAHUA N RALLADO 2 KG"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2113032",
+            description="Exclusión SKU (Conversión): QUESO ASADERO RALLADO N 2 KG"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2113058",
+            description="Exclusión SKU (Conversión): QUESO MOZZARELLA RALLADO 1 / 300 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2113059",
+            description="Exclusión SKU (Conversión): QUESO MONTEREY JACK RALLADO 1 / 300 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2113060",
+            description="Exclusión SKU (Conversión): QUESO CHIHUAHUA RALLADO 1 / 300 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2113064",
+            description="Exclusión SKU (Conversión): HEB CHAROLA REDONDA JAMON SERRANO 1 / .150 KG"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2114048",
+            description="Exclusión SKU (Conversión): QUESO MANCHEGO REBANADO 1 / 400 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2114049",
+            description="Exclusión SKU (Conversión): QUESO MONTEREY JACK REBANADO 1 / 200 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2114050",
+            description="Exclusión SKU (Conversión): QUESO MUENSTER REBANADO 1 / 200 GR CALII"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2132004",
+            description="Exclusión SKU (Conversión): QUESO PARMESANO REGGIANITO RUEDA 5 KG PV - CMT"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2132014",
+            description="Exclusión SKU (Conversión): QUESO PARMESANO GRANA PADANO DOP 1/2 FORMA 1 / 20 KG PV"
+        ),
+        Exclusion(
+            exclusion_type=ExclusionType.ITEM_CODE,
+            value="2134003",
+            description="Exclusión SKU (Conversión): QUESO PARMESANO RASURADO 1 / 454 GR - DON FOODS"
+        ),
     ]
+
 
     added_count = 0
     for exc in defaults:

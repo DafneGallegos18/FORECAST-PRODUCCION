@@ -14,6 +14,7 @@ from app.models.schemas import ExclusionCreate, ExclusionOut
 router = APIRouter(prefix="/api/exclusions", tags=["Exclusiones"])
 
 
+@router.get("", response_model=List[ExclusionOut])
 @router.get("/", response_model=List[ExclusionOut])
 def list_exclusions(active_only: bool = True, db: Session = Depends(get_db)):
     """Lista todas las exclusiones. Por defecto, solo las activas."""
@@ -23,6 +24,7 @@ def list_exclusions(active_only: bool = True, db: Session = Depends(get_db)):
     return query.order_by(Exclusion.created_at.desc()).all()
 
 
+@router.post("", response_model=ExclusionOut, status_code=201)
 @router.post("/", response_model=ExclusionOut, status_code=201)
 def create_exclusion(data: ExclusionCreate, db: Session = Depends(get_db)):
     """Crea una nueva regla de exclusión."""

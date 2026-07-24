@@ -56,6 +56,7 @@ def _build_consumption_query(lookback_days: int) -> str:
     unit_case_sql = "\n                    ".join(unit_cases)
 
     return f"""
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         WITH ConsumoDiario AS (
             SELECT
                 T1.ItemCode,
@@ -65,10 +66,10 @@ def _build_consumption_query(lookback_days: int) -> str:
                 END AS UnidadMedida,
                 T0.CardCode,
                 T0.CardName,
-                CAST(T2.AliasName as nvarchar(max)) AS AliasName,
+                CAST(T2.AliasName as nvarchar(255)) AS AliasName,
                 T2.GroupCode,
-                CAST(T3.GroupName as nvarchar(max)) AS GroupName,
-                CAST(T4.SlpName as nvarchar(max)) AS SlpName,
+                CAST(T3.GroupName as nvarchar(255)) AS GroupName,
+                CAST(T4.SlpName as nvarchar(255)) AS SlpName,
                 SUM(
                     CASE
                         {qty_case_sql}
@@ -89,10 +90,10 @@ def _build_consumption_query(lookback_days: int) -> str:
                 END,
                 T0.CardCode,
                 T0.CardName,
-                CAST(T2.AliasName as nvarchar(max)),
+                CAST(T2.AliasName as nvarchar(255)),
                 T2.GroupCode,
-                CAST(T3.GroupName as nvarchar(max)),
-                CAST(T4.SlpName as nvarchar(max))
+                CAST(T3.GroupName as nvarchar(255)),
+                CAST(T4.SlpName as nvarchar(255))
         )
 
         -- Productos con BOM (lista de materiales)
@@ -100,15 +101,15 @@ def _build_consumption_query(lookback_days: int) -> str:
             OITM.ItemCode,
             OITM.ItemName,
             CD.UnidadMedida,
-            ISNULL(Alm01.OnHand, 0) AS Stock01,
-            ISNULL(Alm03.OnHand, 0) AS Stock03,
+            CAST(ISNULL(Alm01.OnHand, 0) AS FLOAT) AS Stock01,
+            CAST(ISNULL(Alm03.OnHand, 0) AS FLOAT) AS Stock03,
             CD.CardCode,
             CD.CardName,
             CD.AliasName,
             CD.GroupCode,
             CD.GroupName,
             CD.SlpName,
-            CD.ConsumoPromedio,
+            CAST(CD.ConsumoPromedio AS FLOAT) AS ConsumoPromedio,
             CASE
                 WHEN CD.ConsumoPromedio = 0 THEN NULL
                 ELSE ISNULL(Alm01.OnHand, 0) / CD.ConsumoPromedio
@@ -126,15 +127,15 @@ def _build_consumption_query(lookback_days: int) -> str:
             OITM.ItemCode,
             OITM.ItemName,
             OITM.InvntryUom AS UnidadMedida,
-            ISNULL(Alm01.OnHand, 0) AS Stock01,
-            ISNULL(Alm03.OnHand, 0) AS Stock03,
+            CAST(ISNULL(Alm01.OnHand, 0) AS FLOAT) AS Stock01,
+            CAST(ISNULL(Alm03.OnHand, 0) AS FLOAT) AS Stock03,
             CD.CardCode,
             CD.CardName,
             CD.AliasName,
             CD.GroupCode,
             CD.GroupName,
             CD.SlpName,
-            CD.ConsumoPromedio,
+            CAST(CD.ConsumoPromedio AS FLOAT) AS ConsumoPromedio,
             CASE
                 WHEN CD.ConsumoPromedio = 0 THEN NULL
                 ELSE ISNULL(Alm01.OnHand, 0) / CD.ConsumoPromedio
@@ -147,13 +148,10 @@ def _build_consumption_query(lookback_days: int) -> str:
     """
 
 
-def _build_daily_series_query(lookback_days: int) -> str:
+def _build_daily_series_query(lookback_days: int, filter_sql: str) -> str:
     """
     Query para obtener la serie temporal diaria de consumos (para modelos
     avanzados como SES o Holt-Winters que necesitan datos día a día).
-
-    Returns:
-        Query SQL con consumos diarios desglosados por fecha y producto.
     """
     fecha_fin = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
     fecha_inicio = (datetime.now() - timedelta(days=lookback_days)).strftime("%Y%m%d")
@@ -165,32 +163,29 @@ def _build_daily_series_query(lookback_days: int) -> str:
         )
     qty_case_sql = "\n                ".join(qty_cases)
 
+    where_clause = f"T0.DocDate BETWEEN '{fecha_inicio}' AND '{fecha_fin}'"
+    if filter_sql:
+        where_clause += f" AND {filter_sql}"
+
     return f"""
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         SELECT
-            CAST(T0.DocDate AS DATE) AS Fecha,
+            CONVERT(VARCHAR(10), T0.DocDate, 120) AS Fecha,
             T1.ItemCode,
-            T0.CardCode,
-            T0.CardName,
-            CAST(T2.AliasName as nvarchar(max)) AS AliasName,
-            T2.GroupCode,
-            CAST(T3.GroupName as nvarchar(max)) AS GroupName,
-            CAST(T4.SlpName as nvarchar(max)) AS SlpName,
-            SUM(
+            CAST(SUM(
                 CASE
                     {qty_case_sql}
                     ELSE T1.Quantity
                 END
-            ) AS ConsumoTotal
+            ) AS FLOAT) AS ConsumoTotal
         FROM INV1 T1
         INNER JOIN OINV T0 ON T1.DocEntry = T0.DocEntry
         INNER JOIN OITM ON T1.ItemCode = OITM.ItemCode
         INNER JOIN OITT BOM ON OITM.ItemCode = BOM.Code
         LEFT JOIN OCRD T2 ON T0.CardCode = T2.CardCode
-        LEFT JOIN OCRG T3 ON T2.GroupCode = T3.GroupCode
-        LEFT JOIN OSLP T4 ON T2.SlpCode = T4.SlpCode
-        WHERE T0.DocDate BETWEEN '{fecha_inicio}' AND '{fecha_fin}'
-        GROUP BY CAST(T0.DocDate AS DATE), T1.ItemCode, T0.CardCode, T0.CardName, CAST(T2.AliasName as nvarchar(max)), T2.GroupCode, CAST(T3.GroupName as nvarchar(max)), CAST(T4.SlpName as nvarchar(max))
-        ORDER BY T1.ItemCode, CAST(T0.DocDate AS DATE)
+        WHERE {where_clause}
+        GROUP BY CONVERT(VARCHAR(10), T0.DocDate, 120), T1.ItemCode
+        ORDER BY T1.ItemCode, CONVERT(VARCHAR(10), T0.DocDate, 120)
     """
 
 
@@ -230,29 +225,52 @@ def extract_sap_data(lookback_days: Optional[int] = None) -> pd.DataFrame:
     return df
 
 
-def extract_daily_series(lookback_days: Optional[int] = None) -> pd.DataFrame:
+def extract_daily_series(db: Session, lookback_days: Optional[int] = None) -> pd.DataFrame:
     """
-    Extrae la serie temporal diaria de consumos para modelos avanzados.
+    Extrae la serie temporal diaria de consumos para modelos avanzados, pre-filtrando con exclusiones en SQL.
+    """
+    print("      [DEBUG] Inicia extract_daily_series")
+    from app.services.exclusion_service import get_active_exclusions
+    from app.models.db_models import ExclusionType
 
-    Returns:
-        DataFrame con columnas: Fecha, ItemCode, CardCode, CardName, AliasName, GroupCode, GroupName, SlpName, ConsumoTotal.
-    """
+    print("      [DEBUG] Obteniendo exclusiones...")
+    exclusions = get_active_exclusions(db)
+    print(f"      [DEBUG] {len(exclusions)} exclusiones obtenidas.")
+    sql_filters = []
+    
+    for exc in exclusions:
+        if exc.exclusion_type == ExclusionType.CARD_CODE:
+            sql_filters.append(f"T0.CardCode <> '{exc.value}'")
+        elif exc.exclusion_type == ExclusionType.CARD_ITEM:
+            sql_filters.append(f"NOT (T0.CardCode = '{exc.value}' AND T1.ItemCode = '{exc.secondary_value}')")
+        elif exc.exclusion_type == ExclusionType.CARD_NAME_CONTAINS:
+            val = exc.value.replace("'", "''")
+            sql_filters.append(f"T0.CardName NOT LIKE '%{val}%'")
+            sql_filters.append(f"ISNULL(T2.AliasName, '') NOT LIKE '%{val}%'")
+        elif exc.exclusion_type == ExclusionType.CUSTOMER_GROUP:
+            try:
+                g_code = int(exc.value)
+                sql_filters.append(f"ISNULL(T2.GroupCode, 0) <> {g_code}")
+            except ValueError:
+                pass
+        elif exc.exclusion_type == ExclusionType.ITEM_CODE:
+            sql_filters.append(f"T1.ItemCode <> '{exc.value}'")
+
+    filter_sql = " AND ".join(sql_filters) if sql_filters else ""
+
     days = lookback_days or forecast_settings.lookback_days
-    query = _build_daily_series_query(days)
+    query = _build_daily_series_query(days, filter_sql)
     df = sap_connector.query(query)
 
-    df["Fecha"] = pd.to_datetime(df["Fecha"])
-    df["ConsumoTotal"] = pd.to_numeric(df["ConsumoTotal"], errors="coerce").fillna(0)
-    df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
-    if "AliasName" in df.columns:
-        df["AliasName"] = df["AliasName"].fillna("").astype(str).str.strip()
-    if "GroupName" in df.columns:
-        df["GroupName"] = df["GroupName"].fillna("").astype(str).str.strip()
-    if "SlpName" in df.columns:
-        df["SlpName"] = df["SlpName"].fillna("").astype(str).str.strip()
-    if "GroupCode" in df.columns:
-        df["GroupCode"] = pd.to_numeric(df["GroupCode"], errors="coerce").fillna(0).astype(int)
-
+    fechas = [str(x).strip() for x in df["Fecha"].tolist()]
+    item_codes = [str(x).strip() for x in df["ItemCode"].tolist()]
+    consumos = pd.to_numeric(df["ConsumoTotal"], errors="coerce").fillna(0).tolist()
+    
+    df = pd.DataFrame({
+        "Fecha": fechas,
+        "ItemCode": item_codes,
+        "ConsumoTotal": consumos
+    })
     return df
 
 
@@ -261,6 +279,7 @@ def extract_committed_orders() -> pd.DataFrame:
     Extrae los pedidos comprometidos (pendientes de entrega) desde SAP.
     """
     query = """
+        SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
         SELECT
             T1.ItemCode,
             T0.CardCode,
